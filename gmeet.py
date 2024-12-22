@@ -15,8 +15,9 @@ from dotenv import load_dotenv
 import sounddevice as sd
 from scipy.io.wavfile import write
 from speech_to_text import SpeechToText
+import numpy as np
+from scipy import signal
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
@@ -36,14 +37,50 @@ class MeetConfig:
 class AudioRecorder:
     def __init__(self):
         self.sample_rate = int(os.getenv('SAMPLE_RATE', 44100))
+        self.channels = 1  # Using mono for better quality
+        self.dtype = np.float32  # Better precision for audio data
+        
+    def _reduce_noise(self, audio_data):
+        """Apply noise reduction to the audio data."""
+        try:
+            b, a = signal.butter(4, 100/(self.sample_rate/2), 'highpass')
+            filtered_audio = signal.filtfilt(b, a, audio_data)
+            
+            normalized = np.int16(filtered_audio * 32767)
+            return normalized
+            
+        except Exception as e:
+            logging.error(f"Error in noise reduction: {e}")
+            return audio_data
 
     def get_audio(self, filename, duration):
-        print("Recording...")
-        recording = sd.rec(int(duration * self.sample_rate), samplerate=self.sample_rate, channels=2, dtype='int16')
-        sd.wait()  # Wait until the recording is finished
-        write(filename, self.sample_rate, recording)
-        print(f"Recording finished. Saved as {filename}.")
-
+        try:
+            logging.info("Starting audio recording...")
+            print("Recording...")
+            
+            # Configure audio stream with better quality
+            with sd.InputStream(
+                samplerate=self.sample_rate,
+                channels=self.channels,
+                dtype=self.dtype,
+                blocksize=1024,
+                latency='low'
+            ) as stream:
+                frames = []
+                for _ in range(int(duration * self.sample_rate / 1024)):
+                    data, _ = stream.read(1024)
+                    frames.append(data)
+                
+                recording = np.concatenate(frames)
+                
+                # cleaned_audio = self._reduce_noise(recording)
+                
+                write(filename, self.sample_rate, recording)
+                print(f"Recording finished. Saved as {filename}.")
+                
+        except Exception as e:
+            logging.error(f"Error during audio recording: {e}")
+            raise
 
 class GoogleMeetBot:
     """
@@ -245,11 +282,11 @@ class GoogleMeetBot:
             
             if join_button:
                 logger.info("Found join button, attempting to click...")
-                time.sleep(2)  # Small pause before clicking
+                time.sleep(2)
                 join_button.click()
                 logger.info("Join button clicked")
                 
-                time.sleep(5)  # Wait to see if we joined successfully
+                time.sleep(5)
             else:
                 raise Exception("Could not find any join button")
 
@@ -330,6 +367,9 @@ def main():
     load_dotenv()
     
     temp_dir = 'tmp'
+    if not os.path.exists(temp_dir):
+        os.makedirs(temp_dir)
+        
     audio_path = os.path.join(temp_dir, "output.wav")
     bot = None
     
@@ -348,8 +388,11 @@ def main():
         bot = GoogleMeetBot(config)
         bot.login()
         bot.join_meeting()
+
+        recorder = AudioRecorder()
+        # recorder.list_audio_devices()
         
-        AudioRecorder().get_audio(audio_path, config.recording_duration)
+        recorder.get_audio(audio_path, duration=60)
         transcript = SpeechToText().transcribe(audio_path)
         logger.info(f"Transcription: {transcript}")
         
@@ -359,10 +402,11 @@ def main():
         
     finally:
         try:
-            if os.path.exists(audio_path):
-                os.remove(audio_path)
-            if os.path.exists(temp_dir):
-                os.rmdir(temp_dir)
+            pass
+            # if os.path.exists(audio_path):
+            #     os.remove(audio_path)
+            # if os.path.exists(temp_dir):
+            #     os.rmdir(temp_dir)
         except Exception as e:
             logger.error(f"Cleanup failed: {str(e)}")
         
