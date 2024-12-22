@@ -134,7 +134,10 @@ class SpeechToText:
         }
 
     def store_in_json_file(self, data):
-        temp_dir = tempfile.mkdtemp()
+        temp_dir = 'tmp'
+        if not os.path.exists(temp_dir):
+            os.makedirs(temp_dir)
+
         file_path = os.path.join(temp_dir, f'meeting_data_{datetime.datetime.now().strftime("%Y%m%d%H%M%S")}.json')
         print(f"JSON file path: {file_path}")
         with open(file_path, 'w') as f:
