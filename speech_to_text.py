@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import datetime
 from dotenv import load_dotenv
+import math
 
 load_dotenv()
 
@@ -19,6 +20,54 @@ class SpeechToText:
 
     def get_file_size(self, file_path):
         return os.path.getsize(file_path)
+    
+    def split_audio_file(self, audio_file_path, segment_length_seconds=600):
+        """
+        Splits the input audio file into chunks of segment_length_seconds.
+        Returns a list of file paths to these chunks.
+        """
+        # Create an output directory
+        base_name = os.path.splitext(os.path.basename(audio_file_path))[0]
+        output_dir = f"{base_name}_chunks"
+        if not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+
+        # Use ffprobe to get the total duration
+        result = subprocess.run(
+            [
+                'ffprobe', '-i', audio_file_path,
+                '-show_entries', 'format=duration',
+                '-v', 'quiet',
+                '-of', 'csv=p=0'
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT
+        )
+        total_duration = float(result.stdout)
+
+        # Calculate how many chunks we need
+        num_chunks = math.ceil(total_duration / segment_length_seconds)
+
+        chunk_paths = []
+        for i in range(num_chunks):
+            start_time = i * segment_length_seconds
+            out_path = os.path.join(output_dir, f"{base_name}_part_{i}.mp3")
+            
+            cmd = [
+                'ffmpeg',
+                '-y',                # overwrite output if exists
+                '-i', audio_file_path,
+                '-ss', str(start_time),
+                '-t', str(segment_length_seconds),
+                '-c:a', 'libmp3lame',  # force MP3 encoding
+                '-q:a', '2',           # decent quality (VBR ~190kbps)
+                out_path
+            ]
+            
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            chunk_paths.append(out_path)
+
+        return chunk_paths
 
     def get_audio_duration(self, audio_file_path):
         result = subprocess.run(['ffprobe', '-i', audio_file_path, '-show_entries', 'format=duration', '-v', 'quiet', '-of', 'csv=%s' % ("p=0")], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -39,6 +88,30 @@ class SpeechToText:
             
             return compressed_audio_path
         return audio_file_path
+    
+    def chunk_and_transcribe(self, audio_file_path):
+        """
+        Splits a large file into chunks, transcribes each chunk,
+        and returns the concatenated transcription.
+        """
+
+        chunk_paths = self.split_audio_file(audio_file_path, segment_length_seconds=600)
+        all_transcripts = []
+
+        for i, chunk_path in enumerate(chunk_paths):
+            with open(chunk_path, 'rb') as audio_file:
+                # Transcribe each chunk
+                print(f"Transcribing chunk {i+1}/{len(chunk_paths)}: {chunk_path}")
+                response = self.client.audio.translations.create(
+                    file=audio_file,
+                    model=self.WHISPER_MODEL
+                )
+                all_transcripts.append(response.text)
+
+        # Combine all the partial transcripts into one
+        full_transcript = "\n".join(all_transcripts)
+        return full_transcript
+
 
     def transcribe_audio(self, audio_file_path):
         with open(audio_file_path, 'rb') as audio_file:
@@ -143,11 +216,23 @@ class SpeechToText:
         with open(file_path, 'w') as f:
             json.dump(data, f)
         print("JSON file created successfully.")
+    
+    def store_in_txt_file(self, data):
+        temp_dir = 'tmp'
+        if not os.path.exists(temp_dir):
+            os.makedirs(temp_dir)
+
+        file_path = os.path.join(temp_dir, f'meeting_data_{datetime.datetime.now().strftime("%Y%m%d%H%M%S")}.txt')
+        print(f"text file path: {file_path}")
+        with open(file_path, 'w') as f:
+            f.write(data)
+        print("text file created successfully.")
 
     def transcribe(self, audio_file_path):
-        audio_file_path = self.resize_audio_if_needed(audio_file_path)
-        transcription = self.transcribe_audio(audio_file_path)
+        transcription = self.chunk_and_transcribe(audio_file_path)
+        # transcription = self.transcribe_audio(audio_file_path)
         summary = self.meeting_minutes(transcription)
+        self.store_in_txt_file(transcription)
         self.store_in_json_file(summary)
     
         print(f"Abstract Summary: {summary['abstract_summary']}")
